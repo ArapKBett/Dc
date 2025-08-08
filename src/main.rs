@@ -1,4 +1,4 @@
-use actix_web::{App, HttpServer, HttpResponse, Responder, web as actix_web};
+use actix_web::{App, HttpServer, HttpResponse, responder::Responder, web as actix_web};
 use chrono::{Duration, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use std::env;
@@ -52,4 +52,4 @@ async fn main() -> std::io::Result<()> {
     .workers(4)
     .run()
     .await
-  }
+}
