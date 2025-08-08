@@ -3,6 +3,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Signature,
+    commitment_config::CommitmentConfig,
 };
 use solana_transaction_status::{UiTransactionEncoding, EncodedConfirmedTransactionWithStatusMeta};
 use std::str::FromStr;
@@ -24,11 +25,12 @@ pub async fn index_usdc_transfers(
     let signatures = client
         .get_signatures_for_address_with_config(
             &wallet_pubkey,
-            solana_client::rpc_config::RpcGetConfirmedSignaturesForAddress2Config {
+            solana_client::rpc_config::RpcSignaturesForAddressConfig {
                 before: None,
                 until: None,
                 limit: Some(5000), // Increased limit for high transaction volume
-                commitment: Some(solana_sdk::commitment_config::CommitmentConfig::confirmed()),
+                commitment: Some(CommitmentConfig::confirmed()),
+                min_context_slot: None,
             },
         )
         .await
@@ -144,4 +146,4 @@ fn process_transaction(
     }
     
     transfers
-          }
+}
