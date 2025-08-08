@@ -90,3 +90,60 @@ fn process_transaction(
     
     if let Some(meta) = &tx.transaction.meta {
         let pre_balances = meta.pre_token_balances.as_ref().unwrap_or(&vec![]);
+        let post_balances = meta.post_token_balances.as_ref().unwrap_or(&vec![]);
+        info!("Signature {}: Found {} pre_balances, {} post_balances", 
+            signature, pre_balances.len(), post_balances.len());
+        
+        // Check if wallet is a signer
+        let is_signer = tx.transaction.transaction.message().account_keys.iter().any(|key| key.pubkey == *wallet_pubkey);
+        info!("Signature {}: Wallet {} is_signer: {}", signature, wallet_pubkey, is_signer);
+        
+        // Process token balances
+        for post_balance in post_balances {
+            if post_balance.mint != usdc_mint_pubkey.to_string() {
+                continue;
+            }
+            
+            let pre_balance = pre_balances.iter().find(|pre| {
+                pre.account_index == post_balance.account_index && pre.mint == post_balance.mint
+            });
+            
+            let pre_amount = pre_balance
+                .map(|pre| pre.ui_token_amount.ui_amount.unwrap_or(0.0))
+                .unwrap_or(0.0);
+            let post_amount = post_balance.ui_token_amount.ui_amount.unwrap_or(0.0);
+            info!("Signature {}: USDC account_index {}: pre_amount: {}, post_amount: {}", 
+                signature, post_balance.account_index, pre_amount, post_amount);
+            
+            if pre_amount != post_amount {
+                let amount = (post_amount - pre_amount).abs();
+                let transfer_type = if post_amount > pre_amount {
+                    TransferType::Received
+                } else {
+                    TransferType::Sent
+                };
+                
+                // Include transfer if wallet is a signer or involved in balance change
+                if is_signer || post_balance.owner == wallet_pubkey.to_string() {
+                    info!("Found transfer: {} USDC, type: {:?}", amount, transfer_type);
+                    transfers.push(Transfer {
+                        date: tx_time,
+                        amount,
+                        transfer_type,
+                        signature: signature.to_string(),
+                    });
+                } else {
+                    info!("Signature {}: Skipping transfer, wallet {} not owner ({}) or signer", 
+                        signature, wallet_pubkey, post_balance.owner);
+                }
+            } else {
+                info!("Signature {}: No USDC balance change for account_index {} (pre: {}, post: {})", 
+                    signature, post_balance.account_index, pre_amount, post_amount);
+            }
+        }
+    } else {
+        warn!("No meta data for signature: {}", signature);
+    }
+    
+    transfers
+}
