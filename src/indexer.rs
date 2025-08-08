@@ -25,11 +25,12 @@ pub async fn index_usdc_transfers(
     let signatures = client
         .get_signatures_for_address_with_config(
             &wallet_pubkey,
-            solana_client::rpc_config::GetConfirmedSignaturesForAddress2Config {
+            solana_client::rpc_config::RpcSignaturesForAddressConfig {
                 before: None,
                 until: None,
                 limit: Some(5000), // Increased limit for high transaction volume
                 commitment: Some(CommitmentConfig::confirmed()),
+                min_context_slot: None,
             },
         )
         .await
