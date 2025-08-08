@@ -9,7 +9,21 @@ use solana_transaction_status::{UiTransactionEncoding, EncodedConfirmedTransacti
 use std::str::FromStr;
 use log::{info, warn, error};
 
-use crate::models::{Transfer, TransferType};
+#[derive(Debug)]
+pub enum TransferType {
+    Sent,
+    Received,
+}
+
+#[derive(Debug)]
+pub struct Transfer {
+    pub signature: String,
+    pub timestamp: DateTime<Utc>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub amount: f64,
+    pub transfer_type: TransferType,
+}
 
 pub async fn index_usdc_transfers(
     client: &RpcClient,
@@ -20,7 +34,7 @@ pub async fn index_usdc_transfers(
 ) -> Result<Vec<Transfer>, Box<dyn std::error::Error>> {
     let wallet_pubkey = Pubkey::from_str(wallet)?;
     let usdc_mint_pubkey = Pubkey::from_str(usdc_mint)?;
-    
+
     info!("Fetching signatures for wallet: {}", wallet);
     let signatures = client
         .get_signatures_for_address_with_config(
@@ -28,7 +42,7 @@ pub async fn index_usdc_transfers(
             solana_client::rpc_config::RpcSignaturesForAddressConfig {
                 before: None,
                 until: None,
-                limit: Some(5000), // Increased limit for high transaction volume
+                limit: Some(5000),
                 commitment: Some(CommitmentConfig::confirmed()),
                 min_context_slot: None,
             },
@@ -38,10 +52,10 @@ pub async fn index_usdc_transfers(
             error!("Failed to get signatures: {}", e);
             Box::new(e) as Box<dyn std::error::Error>
         })?;
-    
+
     info!("Found {} signatures", signatures.len());
     let mut transfers = Vec::new();
-    
+
     for sig_info in signatures {
         let signature = Signature::from_str(&sig_info.signature)?;
         let block_time = sig_info
@@ -52,14 +66,16 @@ pub async fn index_usdc_transfers(
                 error!("Invalid block time for signature {}: {}", signature, e);
                 Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
             })?;
-        
+
         if let Some(tx_time) = block_time {
             if tx_time < start_time || tx_time > end_time {
-                info!("Skipping signature {}: timestamp {} outside range [{}, {}]", 
-                    signature, tx_time, start_time, end_time);
+                info!(
+                    "Skipping signature {}: timestamp {} outside range [{}, {}]",
+                    signature, tx_time, start_time, end_time
+                );
                 continue;
             }
-            
+
             info!("Fetching transaction for signature: {}", signature);
             let tx = client
                 .get_transaction(&signature, UiTransactionEncoding::JsonParsed)
@@ -68,13 +84,13 @@ pub async fn index_usdc_transfers(
                     error!("Failed to get transaction {}: {}", signature, e);
                     Box::new(e) as Box<dyn std::error::Error>
                 })?;
-            
+
             transfers.extend(process_transaction(&tx, &wallet_pubkey, &usdc_mint_pubkey, tx_time, &signature));
         } else {
             warn!("No block time for signature: {}", signature);
         }
     }
-    
+
     info!("Returning {} transfers", transfers.len());
     Ok(transfers)
 }
@@ -87,63 +103,62 @@ fn process_transaction(
     signature: &Signature,
 ) -> Vec<Transfer> {
     let mut transfers = Vec::new();
-    
+
     if let Some(meta) = &tx.transaction.meta {
         let pre_balances = meta.pre_token_balances.as_ref().unwrap_or(&vec![]);
         let post_balances = meta.post_token_balances.as_ref().unwrap_or(&vec![]);
-        info!("Signature {}: Found {} pre_balances, {} post_balances", 
-            signature, pre_balances.len(), post_balances.len());
-        
-        // Check if wallet is a signer
-        let is_signer = tx.transaction.transaction.message().account_keys.iter().any(|key| key.pubkey == *wallet_pubkey);
-        info!("Signature {}: Wallet {} is_signer: {}", signature, wallet_pubkey, is_signer);
-        
-        // Process token balances
-        for post_balance in post_balances {
-            if post_balance.mint != usdc_mint_pubkey.to_string() {
-                continue;
-            }
-            
-            let pre_balance = pre_balances.iter().find(|pre| {
-                pre.account_index == post_balance.account_index && pre.mint == post_balance.mint
-            });
-            
-            let pre_amount = pre_balance
-                .map(|pre| pre.ui_token_amount.ui_amount.unwrap_or(0.0))
-                .unwrap_or(0.0);
-            let post_amount = post_balance.ui_token_amount.ui_amount.unwrap_or(0.0);
-            info!("Signature {}: USDC account_index {}: pre_amount: {}, post_amount: {}", 
-                signature, post_balance.account_index, pre_amount, post_amount);
-            
-            if pre_amount != post_amount {
-                let amount = (post_amount - pre_amount).abs();
-                let transfer_type = if post_amount > pre_amount {
+
+        for (pre, post) in pre_balances.iter().zip(post_balances.iter()) {
+            // Check if token mint and owner match
+            if pre.mint == *usdc_mint_pubkey && post.mint == *usdc_mint_pubkey {
+                // Check that the wallet is one of the owners (pre or post) -- mostly pre.owner and post.owner are same
+                if let (Some(pre_owner), Some(post_owner)) = (&pre.owner, &post.owner) {
+                    if pre_owner != wallet_pubkey.to_string() && post_owner != wallet_pubkey.to_string() {
+                        continue; // Not related to wallet, skip
+                    }
+                } else {
+                    // Skip if no owner info
+                    continue;
+                }
+
+                // Calculate amount change
+                let pre_amount = pre.ui_token_amount.ui_amount.unwrap_or(0.0);
+                let post_amount = post.ui_token_amount.ui_amount.unwrap_or(0.0);
+                let diff = post_amount - pre_amount;
+
+                if diff.abs() < f64::EPSILON {
+                    continue; // No transfer amount change
+                }
+
+                let transfer_type = if diff > 0.0 {
                     TransferType::Received
                 } else {
                     TransferType::Sent
                 };
-                
-                // Include transfer if wallet is a signer or involved in balance change
-                if is_signer || post_balance.owner == wallet_pubkey.to_string() {
-                    info!("Found transfer: {} USDC, type: {:?}", amount, transfer_type);
-                    transfers.push(Transfer {
-                        date: tx_time,
-                        amount,
-                        transfer_type,
-                        signature: signature.to_string(),
-                    });
+
+                let from = if transfer_type == TransferType::Sent {
+                    Some(wallet_pubkey.to_string())
                 } else {
-                    info!("Signature {}: Skipping transfer, wallet {} not owner ({}) or signer", 
-                        signature, wallet_pubkey, post_balance.owner);
-                }
-            } else {
-                info!("Signature {}: No USDC balance change for account_index {} (pre: {}, post: {})", 
-                    signature, post_balance.account_index, pre_amount, post_amount);
+                    None
+                };
+
+                let to = if transfer_type == TransferType::Received {
+                    Some(wallet_pubkey.to_string())
+                } else {
+                    None
+                };
+
+                transfers.push(Transfer {
+                    signature: signature.to_string(),
+                    timestamp: tx_time,
+                    from,
+                    to,
+                    amount: diff.abs(),
+                    transfer_type,
+                });
             }
         }
-    } else {
-        warn!("No meta data for signature: {}", signature);
     }
-    
+
     transfers
 }
