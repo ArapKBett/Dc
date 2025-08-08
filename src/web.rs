@@ -57,4 +57,4 @@ pub async fn get_transfers(transfers: web::Data<Vec<Transfer>>) -> impl Responde
         table_content
     );
     HttpResponse::Ok().content_type("text/html").body(html)
-                      }
+}
